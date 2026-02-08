@@ -56,6 +56,8 @@ export async function registerRoutes(
   });
 
   app.post("/api/analyze", upload.single("audio"), async (req, res) => {
+    req.setTimeout(600000);
+    res.setTimeout(600000);
     try {
       if (!req.file) {
         return res.status(400).json({

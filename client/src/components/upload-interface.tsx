@@ -83,10 +83,16 @@ export function UploadInterface({
     try {
       setTimeout(() => onAnalyzing(), 500);
 
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minute timeout
+
       const response = await fetch("/api/analyze", {
         method: "POST",
         body: formData,
+        signal: controller.signal,
       });
+
+      clearTimeout(timeoutId);
 
       const result = await response.json();
 
@@ -100,7 +106,9 @@ export function UploadInterface({
         description: "Your audio visualization is ready!",
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to upload file";
+      const message = err instanceof DOMException && err.name === "AbortError"
+        ? "Analysis timed out. Try a shorter audio file."
+        : err instanceof Error ? err.message : "Failed to upload file";
       setError(message);
       toast({
         title: "Upload failed",
