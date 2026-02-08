@@ -3,12 +3,11 @@ import { Upload, Music, FileAudio, AlertCircle } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
-import type { VisualizationData } from "@shared/schema";
 
 interface UploadInterfaceProps {
   onUploadStart: () => void;
   onAnalyzing: () => void;
-  onUploadComplete: (data: VisualizationData) => void;
+  onUploadComplete: (audioUrl: string) => void;
   onUploadError: () => void;
 }
 
@@ -35,8 +34,8 @@ export function UploadInterface({
         return;
       }
 
-      const isAccepted = ACCEPTED_TYPES.some(type => 
-        file.type === type || 
+      const isAccepted = ACCEPTED_TYPES.some(type =>
+        file.type === type ||
         file.name.toLowerCase().endsWith('.wav') ||
         file.name.toLowerCase().endsWith('.mp3') ||
         file.name.toLowerCase().endsWith('.m4a')
@@ -83,7 +82,7 @@ export function UploadInterface({
     try {
       setTimeout(() => onAnalyzing(), 500);
 
-      const response = await fetch("/api/analyze", {
+      const response = await fetch("/api/upload", {
         method: "POST",
         body: formData,
       });
@@ -91,13 +90,14 @@ export function UploadInterface({
       const result = await response.json();
 
       if (!response.ok || !result.success) {
-        throw new Error(result.error || "Failed to analyze audio");
+        throw new Error(result.error || "Failed to upload audio");
       }
 
-      onUploadComplete(result.data);
+      // Pass just the audioUrl — client does all analysis
+      onUploadComplete(result.data.audioUrl);
       toast({
-        title: "Analysis complete",
-        description: "Your audio visualization is ready!",
+        title: "Upload complete",
+        description: "Analyzing audio features in your browser...",
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to upload file";
@@ -143,14 +143,14 @@ export function UploadInterface({
       data-testid="card-upload"
     >
       <div className="text-center mb-8">
-        <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-gradient-to-br from-visualization-cyan via-visualization-purple to-visualization-magenta mb-4">
+        <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-gradient-to-br from-cyan-400 via-purple-500 to-pink-500 mb-4">
           <Music className="w-8 h-8 text-white" />
         </div>
         <h1 className="text-2xl font-semibold text-foreground mb-2">
-          BirdSong 3D Visualizer
+          Acoustic Manifold Visualizer
         </h1>
         <p className="text-muted-foreground text-sm">
-          Upload any audio file and watch it transform into living art
+          Upload music and explore its timbral/harmonic structure in 3D
         </p>
       </div>
 
@@ -159,8 +159,8 @@ export function UploadInterface({
           relative min-h-64 border-2 border-dashed rounded-xl
           flex flex-col items-center justify-center gap-4 p-8
           transition-all duration-200 cursor-pointer
-          ${isDragging 
-            ? "border-primary bg-primary/10 scale-[1.02]" 
+          ${isDragging
+            ? "border-primary bg-primary/10 scale-[1.02]"
             : "border-white/20 hover:border-white/40 hover:bg-white/5"
           }
         `}
@@ -213,32 +213,9 @@ export function UploadInterface({
       )}
 
       <div className="mt-6 pt-6 border-t border-white/10">
-        <p className="text-xs text-muted-foreground text-center mb-4 uppercase tracking-wide font-medium">
-          Or try a sample
+        <p className="text-xs text-muted-foreground text-center">
+          Analysis runs entirely in your browser using Web Audio API, MFCCs, chroma, and PCA
         </p>
-        <div className="grid grid-cols-3 gap-3">
-          {[
-            { name: "Bird Song", icon: "🐦" },
-            { name: "Forest", icon: "🌲" },
-            { name: "Ocean", icon: "🌊" },
-          ].map((sample) => (
-            <Button
-              key={sample.name}
-              variant="outline"
-              className="flex flex-col gap-1 h-auto py-3 border-white/10 hover:border-white/30"
-              onClick={() => {
-                toast({
-                  title: "Sample audio",
-                  description: "Sample audio files will be available in the next update.",
-                });
-              }}
-              data-testid={`button-sample-${sample.name.toLowerCase().replace(" ", "-")}`}
-            >
-              <span className="text-lg">{sample.icon}</span>
-              <span className="text-xs">{sample.name}</span>
-            </Button>
-          ))}
-        </div>
       </div>
     </Card>
   );

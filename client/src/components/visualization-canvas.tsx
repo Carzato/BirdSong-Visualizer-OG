@@ -1,414 +1,388 @@
-import { useRef, useMemo, useEffect } from "react";
+import { useRef, useMemo, useEffect, useCallback } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, PerspectiveCamera } from "@react-three/drei";
 import * as THREE from "three";
-import type { VisualizationData, VisualizationSettings, VisualizationPoint } from "@shared/schema";
+import type { ManifoldData, VisualizationSettings, EmbeddedPoint } from "@shared/schema";
+
+// ─── Types ─────────────────────────────────────────────────────────────────
 
 interface VisualizationCanvasProps {
-  data: VisualizationData;
+  data: ManifoldData;
   currentTime: number;
   isPlaying: boolean;
   settings: VisualizationSettings;
-  onPointHover?: (point: VisualizationPoint | null) => void;
 }
 
-interface SortedPoint {
-  originalIndex: number;
-  time: number;
-}
-
-function mapFrequencyToColor(normalizedFrequency: number): THREE.Color {
-  const t = Math.max(0, Math.min(1, normalizedFrequency));
-  
-  if (t < 0.33) {
-    const localT = t / 0.33;
-    return new THREE.Color().setRGB(
-      0.2 + localT * 0.1,
-      0.1 + localT * 0.6,
-      0.9 - localT * 0.3
-    );
-  } else if (t < 0.66) {
-    const localT = (t - 0.33) / 0.33;
-    return new THREE.Color().setRGB(
-      0.3 + localT * 0.5,
-      0.7 + localT * 0.2,
-      0.6 - localT * 0.5
-    );
-  } else {
-    const localT = (t - 0.66) / 0.34;
-    return new THREE.Color().setRGB(
-      0.8 + localT * 0.2,
-      0.9 - localT * 0.5,
-      0.1 + localT * 0.1
-    );
-  }
-}
-
-interface PointsVisualizationProps {
-  data: VisualizationData;
+interface ManifoldVisualizationProps {
+  data: ManifoldData;
   currentTime: number;
   settings: VisualizationSettings;
 }
 
-function simplex2D(x: number, y: number): number {
-  const F2 = 0.5 * (Math.sqrt(3) - 1);
-  const G2 = (3 - Math.sqrt(3)) / 6;
-  
-  const s = (x + y) * F2;
-  const i = Math.floor(x + s);
-  const j = Math.floor(y + s);
-  const t = (i + j) * G2;
-  const X0 = i - t;
-  const Y0 = j - t;
-  const x0 = x - X0;
-  const y0 = y - Y0;
-  
-  const hash = (xi: number, yi: number) => {
-    const n = xi + yi * 57;
-    return Math.sin(n * 12.9898 + n * 78.233) * 43758.5453 % 1;
-  };
-  
-  return (hash(i, j) * x0 + hash(i + 1, j) * y0) * 0.5;
-}
+// ─── Custom shaders ────────────────────────────────────────────────────────
 
-function PointsVisualization({ data, currentTime, settings }: PointsVisualizationProps) {
+const pointVertexShader = `
+  attribute float pointSize;
+  attribute float pointOpacity;
+  attribute float age;
+  varying vec3 vColor;
+  varying float vOpacity;
+  varying float vAge;
+
+  void main() {
+    vColor = color;
+    vOpacity = pointOpacity;
+    vAge = age;
+    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = pointSize * (350.0 / -mvPosition.z);
+    gl_PointSize = max(gl_PointSize, 1.0);
+    gl_Position = projectionMatrix * mvPosition;
+  }
+`;
+
+const pointFragmentShader = `
+  varying vec3 vColor;
+  varying float vOpacity;
+  varying float vAge;
+
+  void main() {
+    float dist = length(gl_PointCoord - vec2(0.5));
+    if (dist > 0.5) discard;
+
+    // Smooth circular falloff with inner glow
+    float alpha = 1.0 - smoothstep(0.0, 0.5, dist);
+    float glow = exp(-dist * 5.0) * 0.6;
+
+    // Age-based fade: recent points are bright, old ones fade
+    float ageFade = max(0.0, 1.0 - vAge);
+    ageFade = ageFade * ageFade; // quadratic falloff for smoother fade
+
+    vec3 finalColor = vColor * (1.0 + glow);
+    float finalAlpha = alpha * vOpacity * ageFade;
+
+    if (finalAlpha < 0.01) discard;
+    gl_FragColor = vec4(finalColor, finalAlpha);
+  }
+`;
+
+// ─── Trajectory line shaders ───────────────────────────────────────────────
+
+const lineVertexShader = `
+  attribute float lineOpacity;
+  varying float vLineOpacity;
+  varying vec3 vLineColor;
+
+  void main() {
+    vLineOpacity = lineOpacity;
+    vLineColor = color;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const lineFragmentShader = `
+  varying float vLineOpacity;
+  varying vec3 vLineColor;
+
+  void main() {
+    if (vLineOpacity < 0.01) discard;
+    gl_FragColor = vec4(vLineColor, vLineOpacity);
+  }
+`;
+
+// ─── Manifold visualization component ──────────────────────────────────────
+
+function ManifoldVisualization({ data, currentTime, settings }: ManifoldVisualizationProps) {
   const pointsRef = useRef<THREE.Points>(null);
   const linesRef = useRef<THREE.LineSegments>(null);
-  const maxRevealedRef = useRef<number>(0);
-  const currentSizesRef = useRef<Float32Array | null>(null);
-  const currentBrightnessRef = useRef<Float32Array | null>(null);
-  const timeRef = useRef<number>(0);
+  const headGlowRef = useRef<THREE.Mesh>(null);
 
-  const allPoints = useMemo(() => {
-    return data.verses.flatMap(verse => verse.points);
-  }, [data.verses]);
+  const points = data.points;
+  const N = points.length;
 
-  const sortedPointIndices = useMemo(() => {
-    const sorted: SortedPoint[] = allPoints.map((point, i) => ({
-      originalIndex: i,
-      time: point.time,
-    }));
-    sorted.sort((a, b) => a.time - b.time);
-    return sorted;
-  }, [allPoints]);
+  // Precompute sorted time indices for binary search
+  const sortedTimes = useMemo(() => points.map(p => p.time), [points]);
 
-  const { positions, basePositions, colors, sizes, baseColors } = useMemo(() => {
-    const positions = new Float32Array(allPoints.length * 3);
-    const basePositions = new Float32Array(allPoints.length * 3);
-    const colors = new Float32Array(allPoints.length * 3);
-    const sizes = new Float32Array(allPoints.length);
-    const baseColors: THREE.Color[] = [];
-
-    allPoints.forEach((point, i) => {
-      const scale = settings.visualStyle === "galaxy" ? 8 : 5;
-      
-      if (settings.visualStyle === "galaxy") {
-        const angle = point.x * Math.PI * 4;
-        const radius = (0.3 + point.z * 0.7) * scale;
-        positions[i * 3] = Math.cos(angle) * radius;
-        positions[i * 3 + 1] = (point.y - 0.5) * scale * 0.5;
-        positions[i * 3 + 2] = Math.sin(angle) * radius + point.bandOffsetZ * scale;
-      } else {
-        positions[i * 3] = (point.x - 0.5) * scale * 2;
-        positions[i * 3 + 1] = (point.y - 0.5) * scale;
-        positions[i * 3 + 2] = (point.z - 0.5) * scale + point.bandOffsetZ * scale;
-      }
-      
-      basePositions[i * 3] = positions[i * 3];
-      basePositions[i * 3 + 1] = positions[i * 3 + 1];
-      basePositions[i * 3 + 2] = positions[i * 3 + 2];
-
-      const frequencyValue = point.color[0];
-      const color = mapFrequencyToColor(frequencyValue);
-      baseColors.push(color);
-      colors[i * 3] = color.r;
-      colors[i * 3 + 1] = color.g;
-      colors[i * 3 + 2] = color.b;
-
-      sizes[i] = 0.08 + point.size * 0.15;
-    });
-
-    return { positions, basePositions, colors, sizes, baseColors };
-  }, [allPoints, settings.visualStyle]);
-
-  const { lineGeometry, sortedEdgeTimes } = useMemo(() => {
-    if (settings.visualStyle !== "network") return { lineGeometry: null, sortedEdgeTimes: [] };
-
-    interface EdgeData {
-      fromGlobal: number;
-      toGlobal: number;
-      visibleAt: number;
+  // Find the index of the frame closest to currentTime
+  const findCurrentIndex = useCallback((time: number): number => {
+    if (N === 0) return -1;
+    let lo = 0, hi = N - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (sortedTimes[mid] < time) lo = mid + 1;
+      else hi = mid;
     }
-    const edges: EdgeData[] = [];
-    let pointIndex = 0;
-
-    data.verses.forEach(verse => {
-      verse.edges.forEach(([from, to]) => {
-        const fromGlobal = pointIndex + from;
-        const toGlobal = pointIndex + to;
-        if (fromGlobal < allPoints.length && toGlobal < allPoints.length) {
-          const fromTime = allPoints[fromGlobal].time;
-          const toTime = allPoints[toGlobal].time;
-          edges.push({
-            fromGlobal,
-            toGlobal,
-            visibleAt: Math.max(fromTime, toTime),
-          });
-        }
-      });
-      pointIndex += verse.points.length;
-    });
-
-    edges.sort((a, b) => a.visibleAt - b.visibleAt);
-
-    const linePositions: number[] = [];
-    const sortedEdgeTimes: number[] = [];
-
-    edges.forEach(edge => {
-      linePositions.push(
-        positions[edge.fromGlobal * 3],
-        positions[edge.fromGlobal * 3 + 1],
-        positions[edge.fromGlobal * 3 + 2],
-        positions[edge.toGlobal * 3],
-        positions[edge.toGlobal * 3 + 1],
-        positions[edge.toGlobal * 3 + 2]
-      );
-      sortedEdgeTimes.push(edge.visibleAt);
-    });
-
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(linePositions, 3));
-    return { lineGeometry: geometry, sortedEdgeTimes };
-  }, [data.verses, positions, allPoints, settings.visualStyle]);
-
-  useEffect(() => {
-    if (currentTime < 0.01) {
-      maxRevealedRef.current = 0;
+    // Check neighbors for closest
+    if (lo > 0 && Math.abs(sortedTimes[lo - 1] - time) < Math.abs(sortedTimes[lo] - time)) {
+      return lo - 1;
     }
-  }, [currentTime]);
+    return lo;
+  }, [N, sortedTimes]);
 
-  useFrame((_, delta) => {
-    if (!pointsRef.current) return;
-    
-    timeRef.current += delta;
+  // Buffer geometry attributes
+  const { positionArray, colorArray, sizeArray, opacityArray, ageArray } = useMemo(() => {
+    const positionArray = new Float32Array(N * 3);
+    const colorArray = new Float32Array(N * 3);
+    const sizeArray = new Float32Array(N);
+    const opacityArray = new Float32Array(N);
+    const ageArray = new Float32Array(N);
 
-    const colorsAttr = pointsRef.current.geometry.attributes.color;
-    const sizesAttr = pointsRef.current.geometry.attributes.size;
-    const positionsAttr = pointsRef.current.geometry.attributes.position;
-    const colorsArray = colorsAttr.array as Float32Array;
-    const sizesArray = sizesAttr.array as Float32Array;
-    const positionsArray = positionsAttr.array as Float32Array;
+    for (let i = 0; i < N; i++) {
+      const pt = points[i];
+      positionArray[i * 3] = pt.position[0];
+      positionArray[i * 3 + 1] = pt.position[1];
+      positionArray[i * 3 + 2] = pt.position[2];
+      colorArray[i * 3] = pt.color[0];
+      colorArray[i * 3 + 1] = pt.color[1];
+      colorArray[i * 3 + 2] = pt.color[2];
+      sizeArray[i] = pt.size * settings.pointScale;
+      opacityArray[i] = pt.opacity;
+      ageArray[i] = 1; // start fully aged (invisible)
+    }
 
-    if (!currentSizesRef.current || currentSizesRef.current.length !== allPoints.length) {
-      currentSizesRef.current = new Float32Array(allPoints.length);
-      currentBrightnessRef.current = new Float32Array(allPoints.length);
-      for (let i = 0; i < allPoints.length; i++) {
-        currentSizesRef.current[i] = 0.08;
-        currentBrightnessRef.current[i] = 1;
+    return { positionArray, colorArray, sizeArray, opacityArray, ageArray };
+  }, [N, points, settings.pointScale]);
+
+  // Trajectory line geometry: connect consecutive points
+  const { linePositions, lineColors, lineOpacities, lineCount } = useMemo(() => {
+    if (N < 2) return { linePositions: new Float32Array(0), lineColors: new Float32Array(0), lineOpacities: new Float32Array(0), lineCount: 0 };
+
+    const maxGap = 0.15; // max time gap to connect (seconds)
+    const segments: { from: number; to: number }[] = [];
+
+    for (let i = 1; i < N; i++) {
+      const dt = points[i].time - points[i - 1].time;
+      if (dt > 0 && dt < maxGap) {
+        segments.push({ from: i - 1, to: i });
       }
     }
 
-    const timeWindow = 0.03;
-    const revealLeadTime = 0.08;
-    const smoothingFactor = 0.15;
-    const maxDelta = 0.2;
-    const driftAmount = 0.015;
-    const driftSpeed = 0.3;
+    const lineCount = segments.length;
+    const linePositions = new Float32Array(lineCount * 6); // 2 vertices * 3 components
+    const lineColors = new Float32Array(lineCount * 6);
+    const lineOpacities = new Float32Array(lineCount * 2);
 
-    let visiblePointCount = allPoints.length;
-    if (settings.progressiveReveal) {
-      let count = 0;
-      for (let i = 0; i < sortedPointIndices.length; i++) {
-        if (sortedPointIndices[i].time <= currentTime + revealLeadTime) {
-          count = i + 1;
+    for (let s = 0; s < lineCount; s++) {
+      const { from, to } = segments[s];
+      const pf = points[from];
+      const pt = points[to];
+
+      linePositions[s * 6] = pf.position[0];
+      linePositions[s * 6 + 1] = pf.position[1];
+      linePositions[s * 6 + 2] = pf.position[2];
+      linePositions[s * 6 + 3] = pt.position[0];
+      linePositions[s * 6 + 4] = pt.position[1];
+      linePositions[s * 6 + 5] = pt.position[2];
+
+      // Blend colors between endpoints
+      const avgR = (pf.color[0] + pt.color[0]) * 0.5;
+      const avgG = (pf.color[1] + pt.color[1]) * 0.5;
+      const avgB = (pf.color[2] + pt.color[2]) * 0.5;
+      lineColors[s * 6] = avgR;
+      lineColors[s * 6 + 1] = avgG;
+      lineColors[s * 6 + 2] = avgB;
+      lineColors[s * 6 + 3] = avgR;
+      lineColors[s * 6 + 4] = avgG;
+      lineColors[s * 6 + 5] = avgB;
+
+      lineOpacities[s * 2] = 0;
+      lineOpacities[s * 2 + 1] = 0;
+    }
+
+    return { linePositions, lineColors, lineOpacities, lineCount };
+  }, [N, points]);
+
+  // Per-frame update: compute age, visibility, opacity
+  useFrame(() => {
+    if (!pointsRef.current || N === 0) return;
+
+    const geo = pointsRef.current.geometry;
+    const sizes = geo.attributes.pointSize.array as Float32Array;
+    const opacities = geo.attributes.pointOpacity.array as Float32Array;
+    const ages = geo.attributes.age.array as Float32Array;
+    const colors = geo.attributes.color.array as Float32Array;
+
+    const trailLen = settings.trailLength > 0 ? settings.trailLength : Infinity;
+    const currentIdx = findCurrentIndex(currentTime);
+
+    for (let i = 0; i < N; i++) {
+      const pt = points[i];
+      const timeDiff = currentTime - pt.time;
+
+      if (timeDiff < 0) {
+        // Future point: not yet reached
+        ages[i] = 1;
+        opacities[i] = 0;
+        sizes[i] = 0;
+      } else if (trailLen === Infinity || timeDiff <= trailLen) {
+        // Visible point: compute age as fraction of trail
+        const normalizedAge = trailLen === Infinity ? 0 : timeDiff / trailLen;
+        ages[i] = normalizedAge;
+        opacities[i] = pt.opacity;
+        sizes[i] = pt.size * settings.pointScale;
+
+        // Boost brightness of the "head" (current position)
+        if (timeDiff < 0.1) {
+          const boost = 1 + (1 - timeDiff / 0.1) * 1.5;
+          colors[i * 3] = Math.min(1, pt.color[0] * boost);
+          colors[i * 3 + 1] = Math.min(1, pt.color[1] * boost);
+          colors[i * 3 + 2] = Math.min(1, pt.color[2] * boost);
+          sizes[i] *= 1 + (1 - timeDiff / 0.1) * 0.8;
         } else {
-          break;
+          colors[i * 3] = pt.color[0];
+          colors[i * 3 + 1] = pt.color[1];
+          colors[i * 3 + 2] = pt.color[2];
         }
-      }
-      visiblePointCount = Math.max(count, maxRevealedRef.current);
-      maxRevealedRef.current = visiblePointCount;
-    }
-
-    let maxOnsetLow = 0, maxOnsetMid = 0, maxOnsetHigh = 0;
-    for (let i = 0; i < allPoints.length; i++) {
-      const point = allPoints[i];
-      const dt = Math.abs(point.time - currentTime);
-      if (dt < timeWindow) {
-        maxOnsetLow = Math.max(maxOnsetLow, point.onsetLow);
-        maxOnsetMid = Math.max(maxOnsetMid, point.onsetMid);
-        maxOnsetHigh = Math.max(maxOnsetHigh, point.onsetHigh);
-      }
-    }
-
-    allPoints.forEach((point, i) => {
-      const dt = Math.abs(point.time - currentTime);
-      
-      const bandOnset = point.band === 'low' ? point.onsetLow 
-                      : point.band === 'mid' ? point.onsetMid 
-                      : point.onsetHigh;
-      const maxOnset = point.band === 'low' ? maxOnsetLow 
-                     : point.band === 'mid' ? maxOnsetMid 
-                     : maxOnsetHigh;
-      
-      let activation = 0;
-      if (dt < timeWindow && maxOnset > 0.01) {
-        const timeFalloff = 1 - (dt / timeWindow) * (dt / timeWindow);
-        const normOnset = bandOnset / maxOnset;
-        activation = Math.min(1, normOnset * timeFalloff);
-      }
-      
-      const beatBoost = point.beatStrength * activation;
-      const complexityBoost = point.complexity * 0.2;
-      const targetIntensity = activation + beatBoost * 1.5;
-
-      const isVisible = !settings.progressiveReveal || point.time <= currentTime + revealLeadTime;
-      const alpha = isVisible ? 1 : 0;
-      
-      let r = 0, g = 0, b = 0;
-      if (point.band === 'low')  { r = 1; g = 0.2; b = 0.2; }
-      if (point.band === 'mid')  { r = 0.2; g = 1; b = 0.2; }
-      if (point.band === 'high') { r = 0.2; g = 0.2; b = 1; }
-      
-      const targetBrightness = 0.3 + activation * 2.0 + complexityBoost;
-      let currentBrightness = currentBrightnessRef.current![i];
-      let brightnessDelta = (targetBrightness - currentBrightness) * smoothingFactor;
-      brightnessDelta = Math.max(-maxDelta, Math.min(maxDelta, brightnessDelta));
-      currentBrightness += brightnessDelta;
-      currentBrightnessRef.current![i] = currentBrightness;
-      
-      colorsArray[i * 3] = Math.min(1, r * currentBrightness) * alpha;
-      colorsArray[i * 3 + 1] = Math.min(1, g * currentBrightness) * alpha;
-      colorsArray[i * 3 + 2] = Math.min(1, b * currentBrightness) * alpha;
-
-      const baseSize = 0.06 + point.size * 0.1;
-      const pulseSize = baseSize + activation * 0.8;
-      const targetSize = isVisible ? pulseSize * (1 + beatBoost * 0.8) : 0;
-      
-      let currentSize = currentSizesRef.current![i];
-      let sizeDelta = (targetSize - currentSize) * smoothingFactor;
-      sizeDelta = Math.max(-maxDelta * 0.1, Math.min(maxDelta * 0.1, sizeDelta));
-      currentSize += sizeDelta;
-      currentSizesRef.current![i] = currentSize;
-      sizesArray[i] = currentSize;
-      
-      if (isVisible) {
-        const noiseX = simplex2D(i * 0.1, timeRef.current * driftSpeed) * driftAmount;
-        const noiseY = simplex2D(i * 0.1 + 100, timeRef.current * driftSpeed) * driftAmount;
-        const noiseZ = simplex2D(i * 0.1 + 200, timeRef.current * driftSpeed) * driftAmount;
-        
-        positionsArray[i * 3] = basePositions[i * 3] + noiseX;
-        positionsArray[i * 3 + 1] = basePositions[i * 3 + 1] + noiseY;
-        positionsArray[i * 3 + 2] = basePositions[i * 3 + 2] + noiseZ;
-      }
-    });
-
-    colorsAttr.needsUpdate = true;
-    sizesAttr.needsUpdate = true;
-    positionsAttr.needsUpdate = true;
-
-    if (linesRef.current && lineGeometry) {
-      if (settings.progressiveReveal) {
-        let visibleEdgeCount = 0;
-        for (let i = 0; i < sortedEdgeTimes.length; i++) {
-          if (sortedEdgeTimes[i] <= currentTime + revealLeadTime) {
-            visibleEdgeCount = i + 1;
-          } else {
-            break;
-          }
-        }
-        linesRef.current.geometry.setDrawRange(0, visibleEdgeCount * 2);
       } else {
-        linesRef.current.geometry.setDrawRange(0, Infinity);
+        // Too old: faded out
+        ages[i] = 1;
+        opacities[i] = 0;
+        sizes[i] = 0;
       }
+    }
+
+    geo.attributes.pointSize.needsUpdate = true;
+    geo.attributes.pointOpacity.needsUpdate = true;
+    geo.attributes.age.needsUpdate = true;
+    geo.attributes.color.needsUpdate = true;
+
+    // Update trajectory line opacities
+    if (linesRef.current && lineCount > 0) {
+      const lineGeo = linesRef.current.geometry;
+      const lineOps = lineGeo.attributes.lineOpacity.array as Float32Array;
+      let segIdx = 0;
+      for (let i = 1; i < N && segIdx < lineCount; i++) {
+        const dt = points[i].time - points[i - 1].time;
+        if (dt <= 0 || dt >= 0.15) continue;
+
+        const fromAge = currentTime - points[i - 1].time;
+        const toAge = currentTime - points[i].time;
+        const maxAge = Math.max(fromAge, toAge);
+        const minAge = Math.min(fromAge, toAge);
+
+        if (minAge < 0 || (trailLen !== Infinity && maxAge > trailLen)) {
+          lineOps[segIdx * 2] = 0;
+          lineOps[segIdx * 2 + 1] = 0;
+        } else {
+          const fadeFrom = trailLen === Infinity ? 0.4 : 0.4 * Math.max(0, 1 - fromAge / trailLen);
+          const fadeTo = trailLen === Infinity ? 0.4 : 0.4 * Math.max(0, 1 - toAge / trailLen);
+          lineOps[segIdx * 2] = fadeFrom;
+          lineOps[segIdx * 2 + 1] = fadeTo;
+        }
+        segIdx++;
+      }
+      lineGeo.attributes.lineOpacity.needsUpdate = true;
+    }
+
+    // Update head glow position
+    if (headGlowRef.current && currentIdx >= 0 && currentIdx < N) {
+      const pt = points[currentIdx];
+      headGlowRef.current.position.set(pt.position[0], pt.position[1], pt.position[2]);
+      const loudScale = 0.3 + pt.loudness * 2;
+      headGlowRef.current.scale.setScalar(loudScale);
     }
   });
 
   return (
     <group>
+      {/* Point cloud */}
       <points ref={pointsRef}>
         <bufferGeometry>
-          <bufferAttribute
-            attach="attributes-position"
-            count={allPoints.length}
-            array={positions}
-            itemSize={3}
-          />
-          <bufferAttribute
-            attach="attributes-color"
-            count={allPoints.length}
-            array={colors}
-            itemSize={3}
-          />
-          <bufferAttribute
-            attach="attributes-size"
-            count={allPoints.length}
-            array={sizes}
-            itemSize={1}
-          />
+          <bufferAttribute attach="attributes-position" count={N} array={positionArray} itemSize={3} />
+          <bufferAttribute attach="attributes-color" count={N} array={colorArray} itemSize={3} />
+          <bufferAttribute attach="attributes-pointSize" count={N} array={sizeArray} itemSize={1} />
+          <bufferAttribute attach="attributes-pointOpacity" count={N} array={opacityArray} itemSize={1} />
+          <bufferAttribute attach="attributes-age" count={N} array={ageArray} itemSize={1} />
         </bufferGeometry>
         <shaderMaterial
           vertexColors
           transparent
           depthWrite={false}
           blending={THREE.AdditiveBlending}
-          vertexShader={`
-            attribute float size;
-            varying vec3 vColor;
-            void main() {
-              vColor = color;
-              vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-              gl_PointSize = size * (300.0 / -mvPosition.z);
-              gl_Position = projectionMatrix * mvPosition;
-            }
-          `}
-          fragmentShader={`
-            varying vec3 vColor;
-            void main() {
-              float dist = length(gl_PointCoord - vec2(0.5));
-              if (dist > 0.5) discard;
-              float alpha = 1.0 - smoothstep(0.2, 0.5, dist);
-              float glow = exp(-dist * 4.0) * 0.5;
-              vec3 finalColor = vColor + vColor * glow;
-              gl_FragColor = vec4(finalColor, alpha);
-            }
-          `}
+          vertexShader={pointVertexShader}
+          fragmentShader={pointFragmentShader}
         />
       </points>
 
-      {lineGeometry && (
-        <lineSegments ref={linesRef} geometry={lineGeometry}>
-          <lineBasicMaterial
-            color="#4488ff"
+      {/* Trajectory lines */}
+      {lineCount > 0 && (
+        <lineSegments ref={linesRef}>
+          <bufferGeometry>
+            <bufferAttribute attach="attributes-position" count={lineCount * 2} array={linePositions} itemSize={3} />
+            <bufferAttribute attach="attributes-color" count={lineCount * 2} array={lineColors} itemSize={3} />
+            <bufferAttribute attach="attributes-lineOpacity" count={lineCount * 2} array={lineOpacities} itemSize={1} />
+          </bufferGeometry>
+          <shaderMaterial
+            vertexColors
             transparent
-            opacity={0.12}
+            depthWrite={false}
             blending={THREE.AdditiveBlending}
+            vertexShader={lineVertexShader}
+            fragmentShader={lineFragmentShader}
           />
         </lineSegments>
       )}
+
+      {/* Glowing head marker at current position */}
+      <mesh ref={headGlowRef}>
+        <sphereGeometry args={[0.15, 16, 16]} />
+        <meshBasicMaterial
+          color="#ffffff"
+          transparent
+          opacity={0.6}
+          blending={THREE.AdditiveBlending}
+        />
+      </mesh>
     </group>
   );
 }
 
-function AutoRotate({ enabled }: { enabled: boolean }) {
+// ─── Camera follow ─────────────────────────────────────────────────────────
+
+function CameraController({ data, currentTime, settings }: {
+  data: ManifoldData;
+  currentTime: number;
+  settings: VisualizationSettings;
+}) {
   const { camera } = useThree();
-  const targetSpeedRef = useRef(0);
-  const currentSpeedRef = useRef(0);
+  const targetRef = useRef(new THREE.Vector3());
+  const smoothTargetRef = useRef(new THREE.Vector3());
 
   useFrame((_, delta) => {
-    const targetSpeed = enabled ? 0.08 : 0;
-    targetSpeedRef.current = targetSpeed;
-    
-    const speedDiff = targetSpeedRef.current - currentSpeedRef.current;
-    currentSpeedRef.current += speedDiff * 0.02;
-    
-    if (Math.abs(currentSpeedRef.current) > 0.001) {
-      camera.position.applyAxisAngle(new THREE.Vector3(0, 1, 0), delta * currentSpeedRef.current);
-      camera.lookAt(0, 0, 0);
+    // Auto-rotate
+    if (settings.autoRotate && !settings.followCamera) {
+      camera.position.applyAxisAngle(new THREE.Vector3(0, 1, 0), delta * 0.08);
+      camera.lookAt(smoothTargetRef.current);
+    }
+
+    // Follow camera: smoothly track the trajectory head
+    if (settings.followCamera && data.points.length > 0) {
+      // Find current point
+      let closest = data.points[0];
+      let minDiff = Math.abs(closest.time - currentTime);
+      for (const pt of data.points) {
+        const diff = Math.abs(pt.time - currentTime);
+        if (diff < minDiff) {
+          minDiff = diff;
+          closest = pt;
+        }
+      }
+
+      targetRef.current.set(closest.position[0], closest.position[1], closest.position[2]);
+      smoothTargetRef.current.lerp(targetRef.current, delta * 2);
+
+      // Camera orbits around the target
+      const offset = camera.position.clone().sub(smoothTargetRef.current);
+      offset.applyAxisAngle(new THREE.Vector3(0, 1, 0), delta * 0.08);
+      const desiredPos = smoothTargetRef.current.clone().add(offset.normalize().multiplyScalar(8));
+      camera.position.lerp(desiredPos, delta * 1.5);
+      camera.lookAt(smoothTargetRef.current);
     }
   });
 
   return null;
 }
+
+// ─── Main canvas export ────────────────────────────────────────────────────
 
 export function VisualizationCanvas({
   data,
@@ -425,28 +399,31 @@ export function VisualizationCanvas({
         }}
         dpr={[1, 2]}
       >
-        <color attach="background" args={["#0A0A0A"]} />
-        <fog attach="fog" args={["#0A0A0A", 10, 30]} />
+        <color attach="background" args={["#050510"]} />
+        <fog attach="fog" args={["#050510", 15, 40]} />
 
-        <PerspectiveCamera makeDefault position={[0, 2, 12]} fov={60} />
+        <PerspectiveCamera makeDefault position={[0, 3, 14]} fov={55} />
         <OrbitControls
           enableDamping
           dampingFactor={0.05}
           minDistance={3}
-          maxDistance={30}
+          maxDistance={35}
           enablePan={true}
           autoRotate={false}
         />
 
-        <AutoRotate enabled={settings.autoRotate && !settings.isFullscreen} />
+        <CameraController data={data} currentTime={currentTime} settings={settings} />
 
-        <ambientLight intensity={0.1} />
+        <ambientLight intensity={0.05} />
 
-        <PointsVisualization
+        <ManifoldVisualization
           data={data}
           currentTime={currentTime}
           settings={settings}
         />
+
+        {/* Subtle reference grid */}
+        <gridHelper args={[20, 40, "#111133", "#0a0a22"]} position={[0, -6, 0]} />
       </Canvas>
     </div>
   );

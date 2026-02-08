@@ -1,4 +1,4 @@
-import { Repeat, Move3D, Bug, Maximize, Upload, Wand2 } from "lucide-react";
+import { Repeat, Move3D, Bug, Maximize, Upload, Eye } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { VisualizationSettings } from "@shared/schema";
@@ -17,7 +17,7 @@ export function FloatingSettings({
   onReset,
 }: FloatingSettingsProps) {
   return (
-    <div 
+    <div
       className="fixed top-4 right-4 z-10 flex items-center gap-3"
       data-testid="panel-floating-settings"
     >
@@ -27,16 +27,16 @@ export function FloatingSettings({
             <Button
               size="icon"
               variant="ghost"
-              className={`w-8 h-8 ${settings.progressiveReveal ? "text-primary" : "text-muted-foreground"}`}
-              onClick={() => onSettingsChange({ progressiveReveal: !settings.progressiveReveal })}
-              aria-label="Toggle progressive reveal"
-              data-testid="button-progressive"
+              className={`w-8 h-8 ${settings.followCamera ? "text-primary" : "text-muted-foreground"}`}
+              onClick={() => onSettingsChange({ followCamera: !settings.followCamera })}
+              aria-label="Toggle follow camera"
+              data-testid="button-follow-camera"
             >
-              <Wand2 className="w-4 h-4" />
+              <Eye className="w-4 h-4" />
             </Button>
           </TooltipTrigger>
           <TooltipContent side="bottom">
-            <p>Live reveal {settings.progressiveReveal ? "(on)" : "(off)"}</p>
+            <p>Follow trajectory {settings.followCamera ? "(on)" : "(off)"}</p>
           </TooltipContent>
         </Tooltip>
 

@@ -4,7 +4,6 @@ import multer from "multer";
 import { randomUUID } from "crypto";
 import path from "path";
 import fs from "fs";
-import { analyzeAudioFile } from "./audio-analyzer";
 
 const uploadDir = path.join(process.cwd(), "uploads");
 if (!fs.existsSync(uploadDir)) {
@@ -38,7 +37,7 @@ const upload = multer({
     ];
     const allowedExts = [".wav", ".mp3", ".m4a"];
     const ext = path.extname(file.originalname).toLowerCase();
-    
+
     if (allowedMimes.includes(file.mimetype) || allowedExts.includes(ext)) {
       cb(null, true);
     } else {
@@ -55,7 +54,9 @@ export async function registerRoutes(
     res.json({ status: "ok", timestamp: new Date().toISOString() });
   });
 
-  app.post("/api/analyze", upload.single("audio"), async (req, res) => {
+  // Simple upload endpoint — stores the file and returns the URL.
+  // All audio analysis now happens client-side via Web Audio API.
+  app.post("/api/upload", upload.single("audio"), async (req, res) => {
     try {
       if (!req.file) {
         return res.status(400).json({
@@ -64,35 +65,25 @@ export async function registerRoutes(
         });
       }
 
-      const filePath = req.file.path;
       const filename = req.file.filename;
-
-      console.log(`Analyzing audio file: ${filename}`);
-
-      const analysisResult = await analyzeAudioFile(filePath);
-
-      const visualizationData = {
-        audioUrl: `/uploads/${filename}`,
-        duration: analysisResult.duration,
-        sampleRate: analysisResult.sampleRate,
-        verses: analysisResult.verses,
-      };
-
-      console.log(`Analysis complete: ${analysisResult.verses.length} verses, ${analysisResult.duration.toFixed(2)}s duration`);
+      console.log(`Audio file uploaded: ${filename}`);
 
       res.json({
         success: true,
-        data: visualizationData,
+        data: {
+          audioUrl: `/uploads/${filename}`,
+        },
       });
     } catch (error) {
-      console.error("Error analyzing audio:", error);
+      console.error("Error uploading audio:", error);
       res.status(500).json({
         success: false,
-        error: error instanceof Error ? error.message : "Failed to analyze audio",
+        error: error instanceof Error ? error.message : "Failed to upload audio",
       });
     }
   });
 
+  // Serve uploaded audio files
   app.use("/uploads", (req, res, next) => {
     const cleanPath = req.path.replace(/^\//, "");
     const filePath = path.join(uploadDir, cleanPath);

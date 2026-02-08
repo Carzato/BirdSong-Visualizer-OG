@@ -2,11 +2,10 @@ import { useRef, useEffect, useCallback, useState } from "react";
 import { Play, Pause, Volume2, VolumeX } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import type { VisualizationData, VisualizationSettings, VisualStyle } from "@shared/schema";
+import type { ManifoldData, VisualizationSettings } from "@shared/schema";
 
 interface ControlPanelProps {
-  data: VisualizationData;
+  data: ManifoldData;
   currentTime: number;
   isPlaying: boolean;
   settings: VisualizationSettings;
@@ -53,14 +52,14 @@ export function ControlPanel({
     if (!audio) return;
 
     let animationId: number;
-    
+
     const pollTime = () => {
       if (audio && !audio.paused) {
         onTimeUpdate(audio.currentTime);
       }
       animationId = requestAnimationFrame(pollTime);
     };
-    
+
     animationId = requestAnimationFrame(pollTime);
 
     const handleEnded = () => {
@@ -127,18 +126,19 @@ export function ControlPanel({
   const progress = (currentTime / data.duration) * 100;
 
   return (
-    <div 
+    <div
       className="fixed bottom-0 left-0 right-0 z-20 h-20 backdrop-blur-2xl bg-black/40 border-t border-white/5"
       data-testid="panel-controls"
     >
       <audio ref={audioRef} src={data.audioUrl} preload="auto" />
 
       <div className="h-full max-w-screen-xl mx-auto px-6 flex items-center gap-6">
+        {/* Play/Pause + Volume */}
         <div className="flex items-center gap-3">
           <Button
             size="icon"
             variant="outline"
-            className="w-12 h-12 rounded-full border-gradient-to-r from-visualization-cyan to-visualization-purple border-white/20"
+            className="w-12 h-12 rounded-full border-white/20"
             onClick={onPlayPause}
             data-testid="button-play-pause"
           >
@@ -149,7 +149,7 @@ export function ControlPanel({
             )}
           </Button>
 
-          <div 
+          <div
             className="relative"
             onMouseEnter={() => setShowVolume(true)}
             onMouseLeave={() => setShowVolume(false)}
@@ -188,29 +188,12 @@ export function ControlPanel({
           </span>
         </div>
 
+        {/* Timeline */}
         <div className="flex-1 relative">
-          <div className="relative h-6 flex items-center">
-            {data.verses.map((verse) => {
-              const startPercent = (verse.start / data.duration) * 100;
-              return (
-                <div
-                  key={verse.id}
-                  className="absolute h-3 w-px bg-white/30"
-                  style={{ left: `${startPercent}%` }}
-                  title={verse.name}
-                >
-                  <span className="absolute -top-5 left-1/2 -translate-x-1/2 text-xs text-muted-foreground opacity-0 hover:opacity-100 transition-opacity whitespace-nowrap">
-                    {verse.name}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-
           <div className="relative">
             <div className="absolute inset-0 h-1 rounded-full bg-white/10" />
-            <div 
-              className="absolute h-1 rounded-full bg-gradient-to-r from-visualization-cyan via-visualization-purple to-visualization-magenta"
+            <div
+              className="absolute h-1 rounded-full bg-gradient-to-r from-cyan-400 via-purple-500 to-pink-500"
               style={{ width: `${progress}%` }}
             />
             <Slider
@@ -225,20 +208,34 @@ export function ControlPanel({
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
-          <Select
-            value={settings.visualStyle}
-            onValueChange={(value: VisualStyle) => onSettingsChange({ visualStyle: value })}
-          >
-            <SelectTrigger className="w-32 bg-white/5 border-white/10" data-testid="select-visual-style">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="network">Network</SelectItem>
-              <SelectItem value="galaxy">Galaxy</SelectItem>
-              <SelectItem value="ribbons">Ribbons</SelectItem>
-            </SelectContent>
-          </Select>
+        {/* Trail length control */}
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground whitespace-nowrap">
+            Trail {settings.trailLength > 0 ? `${settings.trailLength}s` : "All"}
+          </span>
+          <Slider
+            className="w-20"
+            value={[settings.trailLength]}
+            min={0}
+            max={60}
+            step={1}
+            onValueChange={(v) => onSettingsChange({ trailLength: v[0] })}
+            data-testid="slider-trail"
+          />
+        </div>
+
+        {/* Point scale */}
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground whitespace-nowrap">Size</span>
+          <Slider
+            className="w-16"
+            value={[settings.pointScale]}
+            min={0.2}
+            max={3}
+            step={0.1}
+            onValueChange={(v) => onSettingsChange({ pointScale: v[0] })}
+            data-testid="slider-point-scale"
+          />
         </div>
       </div>
     </div>

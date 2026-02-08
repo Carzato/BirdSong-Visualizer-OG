@@ -33,7 +33,9 @@ interface VisualizationPoint {
   complexity: number;
   band: 'low' | 'mid' | 'high';
   bandOffsetZ: number;
-  onset: number;
+  onsetLow: number;
+  onsetMid: number;
+  onsetHigh: number;
 }
 
 interface Verse {
