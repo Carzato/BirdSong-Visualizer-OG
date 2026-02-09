@@ -41,7 +41,7 @@ export function ControlPanel({
     if (!audio) return;
 
     if (isPlaying) {
-      audio.play().catch(() => {});
+      audio.play().catch((err) => console.warn("Audio play failed:", err));
     } else {
       audio.pause();
     }
@@ -65,7 +65,7 @@ export function ControlPanel({
     const handleEnded = () => {
       if (settings.loopPlayback) {
         audio.currentTime = 0;
-        audio.play().catch(() => {});
+        audio.play().catch((err) => console.warn("Audio loop replay failed:", err));
       } else {
         onPlayPause();
       }

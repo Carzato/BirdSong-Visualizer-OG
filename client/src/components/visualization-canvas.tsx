@@ -118,7 +118,7 @@ function ManifoldVisualization({ data, currentTime, settings }: ManifoldVisualiz
     return lo;
   }, [N, sortedTimes]);
 
-  // Buffer geometry attributes
+  // Buffer geometry attributes (pointScale applied in useFrame, NOT here — avoids flicker)
   const { positionArray, colorArray, sizeArray, opacityArray, ageArray } = useMemo(() => {
     const positionArray = new Float32Array(N * 3);
     const colorArray = new Float32Array(N * 3);
@@ -134,19 +134,26 @@ function ManifoldVisualization({ data, currentTime, settings }: ManifoldVisualiz
       colorArray[i * 3] = pt.color[0];
       colorArray[i * 3 + 1] = pt.color[1];
       colorArray[i * 3 + 2] = pt.color[2];
-      sizeArray[i] = pt.size * settings.pointScale;
+      sizeArray[i] = pt.size;
       opacityArray[i] = pt.opacity;
       ageArray[i] = 1; // start fully aged (invisible)
     }
 
     return { positionArray, colorArray, sizeArray, opacityArray, ageArray };
-  }, [N, points, settings.pointScale]);
+  }, [N, points]);
 
   // Trajectory line geometry: connect consecutive points
-  const { linePositions, lineColors, lineOpacities, lineCount } = useMemo(() => {
-    if (N < 2) return { linePositions: new Float32Array(0), lineColors: new Float32Array(0), lineOpacities: new Float32Array(0), lineCount: 0 };
+  const { linePositions, lineColors, lineOpacities, lineCount, maxGap } = useMemo(() => {
+    if (N < 2) return { linePositions: new Float32Array(0), lineColors: new Float32Array(0), lineOpacities: new Float32Array(0), lineCount: 0, maxGap: 0.15 };
 
-    const maxGap = 0.15; // max time gap to connect (seconds)
+    // Adaptive maxGap: median time spacing * 3 to tolerate downsampling
+    const gaps: number[] = [];
+    for (let i = 1; i < Math.min(N, 200); i++) {
+      gaps.push(points[i].time - points[i - 1].time);
+    }
+    gaps.sort((a, b) => a - b);
+    const medianGap = gaps[Math.floor(gaps.length / 2)] || 0.05;
+    const maxGap = Math.max(0.15, medianGap * 3);
     const segments: { from: number; to: number }[] = [];
 
     for (let i = 1; i < N; i++) {
@@ -188,8 +195,24 @@ function ManifoldVisualization({ data, currentTime, settings }: ManifoldVisualiz
       lineOpacities[s * 2 + 1] = 0;
     }
 
-    return { linePositions, lineColors, lineOpacities, lineCount };
+    return { linePositions, lineColors, lineOpacities, lineCount, maxGap };
   }, [N, points]);
+
+  // Set DynamicDrawUsage on frequently-updated buffer attributes
+  useEffect(() => {
+    if (pointsRef.current) {
+      const geo = pointsRef.current.geometry;
+      for (const name of ["color", "pointSize", "pointOpacity", "age"]) {
+        const attr = geo.attributes[name];
+        if (attr) (attr as THREE.BufferAttribute).setUsage(THREE.DynamicDrawUsage);
+      }
+    }
+    if (linesRef.current) {
+      const geo = linesRef.current.geometry;
+      const attr = geo.attributes.lineOpacity;
+      if (attr) (attr as THREE.BufferAttribute).setUsage(THREE.DynamicDrawUsage);
+    }
+  }, [N]);
 
   // Per-frame update: compute age, visibility, opacity
   useFrame(() => {
@@ -252,7 +275,7 @@ function ManifoldVisualization({ data, currentTime, settings }: ManifoldVisualiz
       let segIdx = 0;
       for (let i = 1; i < N && segIdx < lineCount; i++) {
         const dt = points[i].time - points[i - 1].time;
-        if (dt <= 0 || dt >= 0.15) continue;
+        if (dt <= 0 || dt >= maxGap) continue;
 
         const fromAge = currentTime - points[i - 1].time;
         const toAge = currentTime - points[i].time;
@@ -347,6 +370,22 @@ function CameraController({ data, currentTime, settings }: {
   const targetRef = useRef(new THREE.Vector3());
   const smoothTargetRef = useRef(new THREE.Vector3());
 
+  // Binary search for closest point by time
+  const findClosest = useCallback((time: number): EmbeddedPoint | null => {
+    const pts = data.points;
+    if (pts.length === 0) return null;
+    let lo = 0, hi = pts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (pts[mid].time < time) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo > 0 && Math.abs(pts[lo - 1].time - time) < Math.abs(pts[lo].time - time)) {
+      return pts[lo - 1];
+    }
+    return pts[lo];
+  }, [data.points]);
+
   useFrame((_, delta) => {
     // Auto-rotate
     if (settings.autoRotate && !settings.followCamera) {
@@ -356,16 +395,8 @@ function CameraController({ data, currentTime, settings }: {
 
     // Follow camera: smoothly track the trajectory head
     if (settings.followCamera && data.points.length > 0) {
-      // Find current point
-      let closest = data.points[0];
-      let minDiff = Math.abs(closest.time - currentTime);
-      for (const pt of data.points) {
-        const diff = Math.abs(pt.time - currentTime);
-        if (diff < minDiff) {
-          minDiff = diff;
-          closest = pt;
-        }
-      }
+      const closest = findClosest(currentTime);
+      if (!closest) return;
 
       targetRef.current.set(closest.position[0], closest.position[1], closest.position[2]);
       smoothTargetRef.current.lerp(targetRef.current, delta * 2);

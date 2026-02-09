@@ -142,8 +142,13 @@ function powerIteration(
 ): { eigenvalue: number; eigenvector: number[] } {
   const D = matrix.length;
   let v = new Array(D);
-  // Random init
-  for (let i = 0; i < D; i++) v[i] = Math.random() - 0.5;
+  // Deterministic init: alternating pattern to avoid degeneracy
+  for (let i = 0; i < D; i++) v[i] = (i % 2 === 0 ? 1 : -1) * (1 + (i % 7) * 0.1);
+  // Normalize
+  let initNorm = 0;
+  for (let i = 0; i < D; i++) initNorm += v[i] * v[i];
+  initNorm = Math.sqrt(initNorm);
+  if (initNorm > 0) for (let i = 0; i < D; i++) v[i] /= initNorm;
 
   let eigenvalue = 0;
 

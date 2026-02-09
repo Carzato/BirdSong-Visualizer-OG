@@ -36,6 +36,22 @@ function chromaConcentration(chroma: number[]): number {
 }
 
 /**
+ * Iterative min/max to avoid stack overflow on large arrays.
+ * Math.min(...arr) pushes all elements as function args, exceeding
+ * the ~15K-40K call stack limit for songs >3 minutes.
+ */
+function arrayMinMax(arr: number[]): { min: number; max: number } {
+  if (arr.length === 0) return { min: 0, max: 0 };
+  let min = arr[0];
+  let max = arr[0];
+  for (let i = 1; i < arr.length; i++) {
+    if (arr[i] < min) min = arr[i];
+    if (arr[i] > max) max = arr[i];
+  }
+  return { min, max };
+}
+
+/**
  * Normalize a value within observed min/max range.
  */
 function norm(value: number, min: number, max: number): number {
@@ -57,12 +73,9 @@ export function mapToVisualPoints(
   const centroids = frames.map(f => f.centroid);
   const f0s = frames.filter(f => f.f0 !== null).map(f => Math.log2(f.f0!));
 
-  const loudMin = Math.min(...loudnesses);
-  const loudMax = Math.max(...loudnesses);
-  const centMin = Math.min(...centroids);
-  const centMax = Math.max(...centroids);
-  const f0Min = f0s.length > 0 ? Math.min(...f0s) : 0;
-  const f0Max = f0s.length > 0 ? Math.max(...f0s) : 1;
+  const { min: loudMin, max: loudMax } = arrayMinMax(loudnesses);
+  const { min: centMin, max: centMax } = arrayMinMax(centroids);
+  const { min: f0Min, max: f0Max } = f0s.length > 0 ? arrayMinMax(f0s) : { min: 0, max: 1 };
 
   return frames.map((frame, i) => {
     // ─── Color (HSV → RGB) ───────────────────────────────────

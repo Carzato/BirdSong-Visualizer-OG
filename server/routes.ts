@@ -86,7 +86,11 @@ export async function registerRoutes(
   // Serve uploaded audio files
   app.use("/uploads", (req, res, next) => {
     const cleanPath = req.path.replace(/^\//, "");
-    const filePath = path.join(uploadDir, cleanPath);
+    const filePath = path.resolve(uploadDir, cleanPath);
+    // Prevent path traversal: resolved path must be inside uploadDir
+    if (!filePath.startsWith(uploadDir + path.sep) && filePath !== uploadDir) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
     if (fs.existsSync(filePath)) {
       const ext = path.extname(filePath).toLowerCase();
       const mimeTypes: Record<string, string> = {

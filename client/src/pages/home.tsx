@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import { useToast } from "@/hooks/use-toast";
 import { UploadInterface } from "@/components/upload-interface";
 import { VisualizationCanvas } from "@/components/visualization-canvas";
 import { ControlPanel } from "@/components/control-panel";
@@ -11,6 +12,7 @@ import { mapToVisualPoints } from "@/lib/visual-mapper";
 import type { ManifoldData, VisualizationSettings } from "@shared/schema";
 
 export default function Home() {
+  const { toast } = useToast();
   const [manifoldData, setManifoldData] = useState<ManifoldData | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState("Uploading audio...");
@@ -89,9 +91,14 @@ export default function Home() {
       setIsPlaying(false);
     } catch (err) {
       console.error("Client-side analysis failed:", err);
+      toast({
+        title: "Analysis failed",
+        description: err instanceof Error ? err.message : "An unknown error occurred during audio analysis.",
+        variant: "destructive",
+      });
       setIsLoading(false);
     }
-  }, []);
+  }, [toast]);
 
   const handleUploadError = useCallback(() => {
     setIsLoading(false);

@@ -211,7 +211,7 @@ function yinPitchDetect(
   let runningSum = 0;
   for (let tau = 1; tau < halfW; tau++) {
     runningSum += diff[tau];
-    cmndf[tau] = diff[tau] * tau / runningSum;
+    cmndf[tau] = runningSum > 0 ? (diff[tau] * tau / runningSum) : 1;
   }
 
   // Step 3: Absolute threshold
@@ -435,12 +435,22 @@ export async function extractFeatures(
  * Decode an audio URL into an AudioBuffer using Web Audio API.
  */
 export async function decodeAudioFromUrl(url: string): Promise<AudioBuffer> {
-  const response = await fetch(url);
+  let response: Response;
+  try {
+    response = await fetch(url);
+  } catch (err) {
+    throw new Error(`Network error fetching audio: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (!response.ok) {
+    throw new Error(`Failed to fetch audio (HTTP ${response.status}): ${response.statusText}`);
+  }
   const arrayBuffer = await response.arrayBuffer();
   const audioCtx = new AudioContext({ sampleRate: 44100 });
   try {
     const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
     return audioBuffer;
+  } catch (err) {
+    throw new Error(`Failed to decode audio data: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
     await audioCtx.close();
   }
